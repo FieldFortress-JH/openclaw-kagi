@@ -2,13 +2,20 @@ import type { KagiSearchResult } from "./types.js";
 import { parseKagiResultsPage } from "../html-parser.js";
 import { validateTokenFromResponse } from "../token-validator.js";
 
-const KAGI_SEARCH_URL = "https://kagi.com/html/search";
+const KAGI_ORIGIN = "https://kagi.com";
+const KAGI_SEARCH_URL = `${KAGI_ORIGIN}/html/search`;
+const SETTINGS_URL = "https://kagi.com/settings/user_details";
+const ISSUES_URL = "https://github.com/FieldFortress-JH/openclaw-kagi/issues";
 
 export interface SessionSearchOptions {
   token: string;
   query: string;
   count: number;
   timeoutMs: number;
+  /** Caller cancellation (forwarded from OpenClaw's tool execution context). */
+  signal?: AbortSignal;
+  /** OpenClaw request fence; called before each network request. */
+  assertCurrent?: () => void;
 }
 
 export type SessionSearchResult =
@@ -25,8 +32,31 @@ export type SessionSearchResult =
         | "parse_breakage"
         | "fetch_error";
       detail?: string;
+      /** Debug-only page structure sample; never returned to the model. */
       htmlSample?: string;
     };
+
+const EXPIRED_MESSAGE =
+  `Kagi Session Link has expired or is invalid. Ask the user to generate a new one at ${SETTINGS_URL} and paste it, or use: /kagi session <session-link>`;
+
+/** Resolve a redirect target, allowing only https://kagi.com so the session cookie never leaves Kagi. */
+function resolveKagiRedirect(location: string): URL | undefined {
+  try {
+    const url = new URL(location, KAGI_ORIGIN);
+    return url.origin === KAGI_ORIGIN ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isSigninUrl(url: string): boolean {
+  try {
+    const { pathname, search } = new URL(url);
+    return pathname.startsWith("/signin") || search.includes("invalid_token");
+  } catch {
+    return false;
+  }
+}
 
 export async function sessionSearch(
   opts: SessionSearchOptions
@@ -37,20 +67,26 @@ export async function sessionSearch(
 
   const headers: Record<string, string> = {
     "User-Agent":
-      "OpenClaw-Kagi/1.0 (Plugin; +https://github.com/its-clawdia/openclaw-kagi)",
+      "OpenClaw-Kagi/1.1 (Plugin; +https://github.com/FieldFortress-JH/openclaw-kagi)",
     Accept: "text/html",
   };
 
+  // One deadline for the whole exchange, also honoring caller cancellation.
+  const timeout = AbortSignal.timeout(opts.timeoutMs);
+  const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+
   let response: Response;
   try {
+    opts.assertCurrent?.();
     // Step 1: Send request with token — Kagi responds with 302 + Set-Cookie
-    response = await fetch(url.toString(), {
+    response = await fetch(url, {
       method: "GET",
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(opts.timeoutMs),
+      signal,
     });
   } catch (err) {
+    if (opts.signal?.aborted) throw err;
     return {
       ok: false,
       error: `Failed to fetch Kagi search results: ${err instanceof Error ? err.message : String(err)}`,
@@ -61,16 +97,14 @@ export async function sessionSearch(
   // Validate token from the initial response
   const tokenStatus = validateTokenFromResponse(response);
   if (!tokenStatus.valid) {
-    const messages: Record<string, string> = {
-      redirect_to_login:
-        "Kagi Session Link has expired or is invalid. Ask the user to generate a new one at https://kagi.com/settings/user_details and paste it, or use: /kagi session <session-link>",
-      http_error: `Kagi returned HTTP ${tokenStatus.statusCode}. The Session Link may be invalid. Ask the user for a new one from https://kagi.com/settings/user_details or use: /kagi session <session-link>`,
-    };
+    await response.body?.cancel().catch(() => {});
+    if (tokenStatus.reason === "redirect_to_login") {
+      return { ok: false, error: EXPIRED_MESSAGE, errorCode: "token_expired" };
+    }
     return {
       ok: false,
-      error: messages[tokenStatus.reason] ?? "Unknown token error",
-      errorCode:
-        tokenStatus.reason === "http_error" ? "token_invalid" : "token_expired",
+      error: `Kagi returned HTTP ${tokenStatus.statusCode}. The Session Link may be invalid. Ask the user for a new one from ${SETTINGS_URL} or use: /kagi session <session-link>`,
+      errorCode: "token_invalid",
       detail: tokenStatus.detail,
     };
   }
@@ -80,28 +114,54 @@ export async function sessionSearch(
   if (response.status === 302) {
     // Step 2: Valid token — Kagi set a cookie and redirected.
     // Extract the Set-Cookie and follow the redirect.
-    const setCookies = response.headers.getSetCookie?.() ?? [];
-    const cookieHeader = setCookies
+    await response.body?.cancel().catch(() => {});
+    const cookieHeader = response.headers
+      .getSetCookie()
       .map((c) => c.split(";")[0])
       .join("; ");
 
-    const redirectLocation = response.headers.get("location") ?? "";
-    const redirectUrl = redirectLocation.startsWith("http")
-      ? redirectLocation
-      : `https://kagi.com${redirectLocation}`;
+    const redirectUrl = resolveKagiRedirect(response.headers.get("location") ?? "");
+    if (!redirectUrl) {
+      return {
+        ok: false,
+        error: "Kagi redirected to an unexpected location; refusing to forward the session.",
+        errorCode: "fetch_error",
+      };
+    }
 
     try {
-      const followUp = await fetch(redirectUrl, {
+      opts.assertCurrent?.();
+      // Follow further redirects manually too, so the cookie stays on kagi.com.
+      let followUp = await fetch(redirectUrl, {
         method: "GET",
-        headers: {
-          ...headers,
-          Cookie: cookieHeader,
-        },
-        redirect: "follow",
-        signal: AbortSignal.timeout(opts.timeoutMs),
+        headers: { ...headers, ...(cookieHeader ? { Cookie: cookieHeader } : {}) },
+        redirect: "manual",
+        signal,
       });
+      for (let hops = 0; followUp.status >= 300 && followUp.status < 400 && hops < 3; hops++) {
+        await followUp.body?.cancel().catch(() => {});
+        const next = resolveKagiRedirect(followUp.headers.get("location") ?? "");
+        if (!next) {
+          return {
+            ok: false,
+            error: "Kagi redirected to an unexpected location; refusing to forward the session.",
+            errorCode: "fetch_error",
+          };
+        }
+        if (isSigninUrl(next.href)) {
+          return { ok: false, error: EXPIRED_MESSAGE, errorCode: "token_expired" };
+        }
+        opts.assertCurrent?.();
+        followUp = await fetch(next, {
+          method: "GET",
+          headers: { ...headers, ...(cookieHeader ? { Cookie: cookieHeader } : {}) },
+          redirect: "manual",
+          signal,
+        });
+      }
 
       if (!followUp.ok) {
+        await followUp.body?.cancel().catch(() => {});
         return {
           ok: false,
           error: `Kagi returned HTTP ${followUp.status} on follow-up request.`,
@@ -111,6 +171,7 @@ export async function sessionSearch(
 
       html = await followUp.text();
     } catch (err) {
+      if (opts.signal?.aborted) throw err;
       return {
         ok: false,
         error: `Failed to follow Kagi redirect: ${err instanceof Error ? err.message : String(err)}`,
@@ -119,8 +180,18 @@ export async function sessionSearch(
     }
   } else {
     // Direct 200 response (already authenticated via cookies)
-    html = await response.text();
+    try {
+      html = await response.text();
+    } catch (err) {
+      if (opts.signal?.aborted) throw err;
+      return {
+        ok: false,
+        error: `Failed to read Kagi response: ${err instanceof Error ? err.message : String(err)}`,
+        errorCode: "fetch_error",
+      };
+    }
   }
+
   const parsed = parseKagiResultsPage(html);
 
   if (parsed.possibleBreakage) {
@@ -128,15 +199,9 @@ export async function sessionSearch(
       ok: false,
       error: [
         "Kagi returned a page but no search results could be parsed.",
-        "This likely means Kagi's HTML structure has changed and the plugin's selectors need updating.",
-        "",
-        "To help debug, here is a sample of the page structure:",
-        "```",
-        parsed.htmlStructureSample ?? "(no sample available)",
-        "```",
-        "",
-        "Please report this issue at https://github.com/its-clawdia/openclaw-kagi/issues",
-        "or update the selectors in the plugin's selectors.json file.",
+        "This likely means Kagi's HTML structure has changed and the plugin's selectors need updating,",
+        "or the session was signed out. Try /kagi status, or set a fresh Session Link.",
+        `If it persists, report it at ${ISSUES_URL}`,
       ].join("\n"),
       errorCode: "parse_breakage",
       htmlSample: parsed.htmlStructureSample,

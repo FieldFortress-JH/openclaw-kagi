@@ -2,12 +2,36 @@
   "id": "kagi",
   "name": "Kagi Search",
   "description": "Privacy-first web search powered by Kagi",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "contracts": {
-    "webSearchProviders": ["kagi"]
+    "webSearchProviders": [
+      "kagi"
+    ]
+  },
+  "uiHints": {
+    "webSearch.apiKey": {
+      "label": "Kagi Session Link",
+      "placeholder": "https://kagi.com/search?token=...",
+      "sensitive": true,
+      "help": "Optional. /kagi session <link> is the usual way to set this; the /kagi store takes precedence."
+    }
   },
   "configSchema": {
     "type": "object",
-    "properties": {}
+    "additionalProperties": false,
+    "properties": {
+      "webSearch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "apiKey": {
+            "type": [
+              "string",
+              "object"
+            ]
+          }
+        }
+      }
+    }
   }
 }

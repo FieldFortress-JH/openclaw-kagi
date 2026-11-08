@@ -1,37 +1,66 @@
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  chmodSync,
+} from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { extractToken } from "./token-validator.js";
 
-const STORE_PATH = join(homedir(), ".openclaw", "kagi.config.json");
+const STORE_FILE = "kagi.config.json";
 
 interface KagiConfig {
   sessionToken?: string;
 }
 
+/**
+ * Path of the Session Link store. Resolved per call so it follows
+ * OPENCLAW_STATE_DIR (default ~/.openclaw), like the rest of OpenClaw state.
+ */
+export function resolveStorePath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(resolveStateDir(env), STORE_FILE);
+}
+
 export function readStoredToken(): string | undefined {
   try {
-    const data: KagiConfig = JSON.parse(readFileSync(STORE_PATH, "utf-8"));
-    return data.sessionToken || undefined;
+    const data: KagiConfig = JSON.parse(readFileSync(resolveStorePath(), "utf-8"));
+    return typeof data.sessionToken === "string" && data.sessionToken
+      ? data.sessionToken
+      : undefined;
   } catch {
     return undefined;
   }
 }
 
+/**
+ * Save a Session Link (or raw token). The file holds a full-account Kagi
+ * credential, so it is written atomically with owner-only permissions.
+ */
 export function writeStoredToken(tokenOrUrl: string): string {
   const token = extractToken(tokenOrUrl);
-  mkdirSync(join(homedir(), ".openclaw"), { recursive: true });
+  if (!token) throw new Error("Empty Kagi Session Link");
+
+  const path = resolveStorePath();
+  mkdirSync(resolveStateDir(), { recursive: true, mode: 0o700 });
+
+  const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(
-    STORE_PATH,
+    tmp,
     JSON.stringify({ sessionToken: token } satisfies KagiConfig, null, 2) + "\n",
-    "utf-8"
+    { encoding: "utf-8", mode: 0o600 }
   );
+  renameSync(tmp, path);
+  // Tighten files created by older versions with default (world-readable) mode.
+  chmodSync(path, 0o600);
   return token;
 }
 
 export function clearStoredToken(): void {
   try {
-    writeFileSync(STORE_PATH, "{}\n", "utf-8");
+    unlinkSync(resolveStorePath());
   } catch {
     // ignore if file doesn't exist
   }

@@ -1,6 +1,6 @@
 {
   "name": "openclaw-kagi",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "Privacy-first web search powered by Kagi",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepack": "npm run build"
   },
   "keywords": [
     "openclaw",
@@ -23,30 +24,36 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/its-clawdia/openclaw-kagi"
+    "url": "https://github.com/FieldFortress-JH/openclaw-kagi"
   },
   "author": "Clawdia <clawdia@mailbox.org>",
   "license": "MIT",
   "peerDependencies": {
-    "openclaw": ">=2026.3.0"
+    "openclaw": ">=2026.11.2"
   },
   "dependencies": {
-    "linkedom": "^0.18.12"
+    "linkedom": "^0.18.15"
   },
   "devDependencies": {
-    "openclaw": "*",
-    "typescript": "^6.0.2",
-    "vitest": "^4.1.2"
+    "openclaw": "2026.11.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   },
   "openclaw": {
     "extensions": [
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.28"
+      "pluginApi": ">=2026.11.2"
     },
     "build": {
-      "openclawVersion": "2026.3.28"
+      "openclawVersion": "2026.11.2"
     }
+  },
+  "bugs": {
+    "url": "https://github.com/FieldFortress-JH/openclaw-kagi/issues"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

@@ -195,4 +195,64 @@ describe("sessionSearch", () => {
     expect(calledUrl.searchParams.get("token")).toBe("my-token-123");
     expect(calledUrl.searchParams.get("q")).toBe("hello world");
   });
+
+  it("refuses to forward the session cookie to a non-Kagi redirect", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", {
+        status: 302,
+        headers: {
+          Location: "https://evil.example.com/steal",
+          "Set-Cookie": "kagi_session=TOKEN123; path=/",
+        },
+      })
+    );
+
+    const result = await sessionSearch({ token: "t", query: "q", count: 5, timeoutMs: 10000 });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errorCode).toBe("fetch_error");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports expiry when the follow-up redirects to signin", async () => {
+    let call = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response("", {
+          status: 302,
+          headers: { Location: "/html/search?q=q", "Set-Cookie": "kagi_session=X; path=/" },
+        });
+      }
+      return new Response("", { status: 302, headers: { Location: "/signin" } });
+    });
+
+    const result = await sessionSearch({ token: "t", query: "q", count: 5, timeoutMs: 10000 });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errorCode).toBe("token_expired");
+  });
+
+  it("does not put the HTML sample in the model-facing error", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(loadFixture("kagi-results-mutated.html"), { status: 200 })
+    );
+
+    const result = await sessionSearch({ token: "t", query: "q", count: 5, timeoutMs: 10000 });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).not.toContain("<");
+  });
+
+  it("propagates caller cancellation instead of reporting a fetch error", async () => {
+    const controller = new AbortController();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException("aborted", "AbortError");
+    });
+
+    await expect(
+      sessionSearch({ token: "t", query: "q", count: 5, timeoutMs: 10000, signal: controller.signal })
+    ).rejects.toThrow();
+  });
 });
